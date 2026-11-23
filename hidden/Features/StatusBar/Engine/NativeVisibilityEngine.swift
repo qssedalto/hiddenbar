@@ -473,6 +473,12 @@ final class NativeVisibilityEngine: MenuBarEngine {
                                                        displays: displays,
                                                        isLTR: isLTR,
                                                        excludingBundle: self.ownBundleIdentifier)
+            // Only items actually placed by this Accessibility read can
+            // establish a drag. Cached overflow entries and unreadable
+            // placeholders must not edit the pinned table or observed baseline.
+            let trustworthySections = layout.sections.filter {
+                !layout.unreadableBundles.contains($0.key)
+            }
             if layout.isIncomplete {
                 if let complete = self.lastCompleteLayout {
                     layout = layout.fillingIn(from: complete)
@@ -484,16 +490,21 @@ final class NativeVisibilityEngine: MenuBarEngine {
             if self.pinsSections() {
                 var observed = self.sectionMemory.sections
                 var table = self.pinnedSections.sections
-                layout.sections = PinnedSectionResolver.resolve(read: layout.sections,
-                                                                launchedSinceRead: self.launchedSinceRead,
-                                                                ignoringDrags: self.ignoredDrags(),
-                                                                observed: &observed, table: &table)
+                let resolved = PinnedSectionResolver.resolve(read: trustworthySections,
+                                                             launchedSinceRead: self.launchedSinceRead,
+                                                             ignoringDrags: self.ignoredDrags(),
+                                                             observed: &observed, table: &table)
+                // The cached or unreadable entries have no reliable new
+                // position. Use the user's pin first; unknowns stay visible.
+                for bundle in layout.sections.keys {
+                    layout.sections[bundle] = resolved[bundle] ?? table[bundle] ?? .visible
+                }
                 self.sectionMemory.sections = observed
                 self.pinnedSections.sections = table
             } else {
-                self.sectionMemory.sections.merge(layout.sections) { _, read in read }
+                self.sectionMemory.sections.merge(trustworthySections) { _, read in read }
             }
-            self.launchedSinceRead.subtract(layout.sections.keys)
+            self.launchedSinceRead.subtract(trustworthySections.keys)
             // What the read listed, before apps that only started are filled in:
             // those may have no menu-bar icon at all.
             self.onUnrestrictedRead?(layout, inventory)
