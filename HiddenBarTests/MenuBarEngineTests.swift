@@ -2038,9 +2038,94 @@ final class PinnedSectionsTests: XCTestCase {
         XCTAssertEqual(collapse(engine), [own, "com.visible"])
     }
 
+    // With pinned Always Hidden, the expanded bar still has a native hold.
+    // A drag of any icon currently shown must be observed at the next collapse,
+    // without lifting the hold and briefly exposing Always Hidden icons.
+    func testDragsWhileExpandedAndAlwaysHiddenHeldUpdateBothDirections() {
+        table.sections = ["com.always": .alwaysHidden]
+        let engine = makeEngine()
+        collapse(engine)
+        engine.updateAlwaysHiddenSection(enabled: false, separatorHidden: true)
+        engine.expand()
+        let expandedRequest = visibility.requests.count - 1
+        XCTAssertEqual(visibility.requests[expandedRequest].bundles,
+                       [own, "com.hidden", "com.visible"])
+        visibility.succeed(expandedRequest)
+        let previousReads = inventory.snapshots
+
+        move("com.hidden", to: 1450)
+        move("com.visible", to: 1120)
+        engine.collapse { _ in }
+        XCTAssertGreaterThan(inventory.snapshots, previousReads,
+                             "the shown items must be read, not taken from the old layout")
+        XCTAssertEqual(table.sections["com.hidden"], .visible)
+        XCTAssertEqual(table.sections["com.visible"], .hidden)
+        XCTAssertEqual(visibility.requests.last?.bundles, [own, "com.hidden"])
+        XCTAssertEqual(table.sections["com.always"], .alwaysHidden)
+        visibility.succeed(visibility.requests.count - 1)
+        XCTAssertEqual(engine.state, .collapsed)
+    }
+
+    // A held restriction can report a stale AX position for an app it hides.
+    // Never turn an Always Hidden pin into Visible based on such a frame.
+    func testPartialReadDoesNotInterpretStaleAlwaysHiddenFrameAsDrag() {
+        table.sections = ["com.always": .alwaysHidden]
+        let engine = makeEngine()
+        collapse(engine)
+        engine.updateAlwaysHiddenSection(enabled: false, separatorHidden: true)
+        engine.expand()
+        visibility.succeed(visibility.requests.count - 1)
+
+        move("com.always", to: 1450) // stale AX value, not actually shown
+        engine.collapse { _ in }
+        XCTAssertEqual(table.sections["com.always"], .alwaysHidden)
+        XCTAssertEqual(observed.sections["com.always"], .hidden)
+        XCTAssertEqual(visibility.requests.last?.bundles, [own, "com.visible"])
+    }
+
     // Given an app whose icons Accessibility cannot place (Little Snitch, #502)
     // When it is new, it shows on collapse; once Settings › Icons pins it hidden, it hides
     // Then its unknown position never overrides the pinned choice
+    // Accessibility returning no frame is not evidence of a drag from Hidden
+    // to Visible. A temporary AX failure must not silently unpin the app.
+    func testUnreadablePositionDoesNotOverwriteHiddenPinOrObservedPosition() {
+        let engine = makeEngine()
+        collapse(engine)
+        XCTAssertEqual(table.sections["com.hidden"], .hidden)
+        XCTAssertEqual(observed.sections["com.hidden"], .hidden)
+
+        engine.expand()
+        inventory.items = inventory.items.filter { $0.bundleIdentifier != "com.hidden" }
+            + [MenuBarInventoryItem(bundleIdentifier: "com.hidden", frame: .zero, isUnreadable: true)]
+        XCTAssertEqual(collapse(engine), [own, "com.visible"])
+        XCTAssertEqual(table.sections["com.hidden"], .hidden)
+        XCTAssertEqual(observed.sections["com.hidden"], .hidden)
+
+        // Once Accessibility recovers, a real move is still recognized.
+        engine.expand()
+        move("com.hidden", to: 1450)
+        XCTAssertEqual(collapse(engine), [own, "com.hidden", "com.visible"])
+        XCTAssertEqual(table.sections["com.hidden"], .visible)
+    }
+
+    // An overflowing snapshot borrows items from a previous complete read.
+    // That borrowed old position cannot replace the user's newer pin.
+    func testOverflowCacheDoesNotOverwritePinOrObservedPosition() {
+        let engine = makeEngine()
+        collapse(engine)
+        engine.expand()
+        table.sections["com.visible"] = .hidden
+        // The current incomplete read omits com.visible altogether.
+        inventory.items = [item("com.hidden", x: 1100),
+            MenuBarInventoryItem(bundleIdentifier: "com.apple.MenuBarAgent",
+                                 frame: CGRect(x: 1500, y: 0, width: 24, height: 24),
+                                 systemIdentifier: "menu-bar-overflow-indicator")]
+        XCTAssertEqual(collapse(engine), [own])
+        XCTAssertEqual(table.sections["com.visible"], .hidden)
+        XCTAssertEqual(observed.sections["com.visible"], .visible,
+                       "an overflow cache is not a new observed drag")
+    }
+
     func testAnUnplaceableAppShowsUntilPinnedHidden() {
         inventory.items.append(MenuBarInventoryItem(bundleIdentifier: "at.obdev.littlesnitch.agent", frame: .zero, isUnreadable: true))
         let engine = makeEngine()

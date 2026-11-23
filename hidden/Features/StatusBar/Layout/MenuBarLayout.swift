@@ -265,6 +265,10 @@ struct MenuBarLayout: Equatable {
     // The active display's menu bar overflowed (a narrow display), and macOS
     // lists only the items that fit, so apps are missing from `sections`.
     var isIncomplete = false
+    // A position-less Accessibility placeholder is not a real observation of
+    // where the user dragged an icon. Keep these bundles visible by default,
+    // but never use the placeholder to overwrite a pinned section.
+    var unreadableBundles: Set<String> = []
 
     // An incomplete read with the apps it missed taken from an earlier read.
     func fillingIn(from earlier: MenuBarLayout) -> MenuBarLayout {
@@ -395,6 +399,9 @@ enum MenuBarLayoutResolver {
                 key = systemExtrasBundle
             } else if item.runsOutsideApplicationsFolder {
                 layout.appsMacOSHides[key] = item.ownerName ?? key
+            }
+            if item.isUnreadable {
+                layout.unreadableBundles.insert(key)
             }
             // One app can own several items, but hiding applies to the whole
             // bundle. The most visible item wins so an icon the user kept visible
