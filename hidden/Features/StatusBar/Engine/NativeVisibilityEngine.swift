@@ -291,9 +291,13 @@ final class NativeVisibilityEngine: MenuBarEngine {
             logUnavailableOnce("NativeVisibility: hiding unavailable: Accessibility permission is needed to read the menu-bar sections")
             return completion(.refused(.accessibilityNeeded))
         }
+        // The expanded bar can still hold a restriction for Always Hidden.
+        // Its *shown* apps can move across the arrow; read those positions
+        // before collapsing rather than reusing the layout from last time.
+        let readShownIcons = assertion != nil && pinsSections()
         state = .calibrating
         startCollapseTimeout(completion)
-        withLayout { [weak self] layout in
+        withLayout(readShownIconsWhileRestricted: readShownIcons) { [weak self] layout in
             guard let self = self else { return }
             guard let layout = layout else {
                 // The strict presentation list needs no layout.
@@ -436,11 +440,23 @@ final class NativeVisibilityEngine: MenuBarEngine {
         setSeparatorsVisible(true)
     }
 
-    // The sections as the user arranged them. Read fresh only from an
-    // unrestricted bar; while a restriction is active the cached ones stand in.
+    // Reads a complete bar when unrestricted. During a transition from an
+    // expanded bar that still hides Always Hidden items, only currently
+    // *allowed and shown* apps have trustworthy Accessibility frames. Refresh
+    // those positions so Cmd-drags across the arrow take effect on collapse;
+    // preserve the old sections for still-hidden apps (their frames are stale).
     // Superseded by any later expand or activation, like an activation is.
-    private func withLayout(_ body: @escaping (MenuBarLayout?) -> Void) {
-        if assertion != nil {
+    private func withLayout(readShownIconsWhileRestricted: Bool = false,
+                            _ body: @escaping (MenuBarLayout?) -> Void) {
+        let shownWhileRestricted: Set<String>?
+        if assertion != nil, readShownIconsWhileRestricted, pinsSections(),
+           !holdsPresentationList, inFlightHold == nil, generation == assertionGeneration {
+            let exposed = Set(layout?.bundles(in: [.visible, .hidden]) ?? [])
+            shownWhileRestricted = exposed.intersection(assertionBundles)
+        } else {
+            shownWhileRestricted = nil
+        }
+        if assertion != nil && shownWhileRestricted == nil {
             return body(layout)
         }
         guard let arrow = items?.toggleItem,
@@ -473,6 +489,30 @@ final class NativeVisibilityEngine: MenuBarEngine {
                                                        displays: displays,
                                                        isLTR: isLTR,
                                                        excludingBundle: self.ownBundleIdentifier)
+            if let shown = shownWhileRestricted {
+                // Assessment mode leaves stale AX frames for apps it hides.
+                // An expanded bar may still have such a hold for Always Hidden.
+                // Reconcile only the apps this hold exposes, never its hidden
+                // apps or the cached overflow entries. In particular, do not
+                // call onUnrestrictedRead: the catalog needs a complete read.
+                let readable = layout.sections.filter {
+                    shown.contains($0.key) && !layout.unreadableBundles.contains($0.key)
+                }
+                var observed = self.sectionMemory.sections
+                var table = self.pinnedSections.sections
+                let updates = PinnedSectionResolver.resolve(read: readable,
+                                                            launchedSinceRead: self.launchedSinceRead,
+                                                            ignoringDrags: self.ignoredDrags(),
+                                                            observed: &observed, table: &table)
+                self.sectionMemory.sections = observed
+                self.pinnedSections.sections = table
+                self.launchedSinceRead.subtract(readable.keys)
+                var merged = self.layout ?? MenuBarLayout(sections: [:])
+                merged.sections.merge(updates) { _, update in update }
+                self.layout = merged
+                NSLog("NativeVisibility: refreshed \(updates.count) shown icon sections while Always Hidden stays restricted")
+                return body(merged)
+            }
             // Only items actually placed by this Accessibility read can
             // establish a drag. Cached overflow entries and unreadable
             // placeholders must not edit the pinned table or observed baseline.
