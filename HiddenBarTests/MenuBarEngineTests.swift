@@ -2041,6 +2041,46 @@ final class PinnedSectionsTests: XCTestCase {
     // Given an app whose icons Accessibility cannot place (Little Snitch, #502)
     // When it is new, it shows on collapse; once Settings › Icons pins it hidden, it hides
     // Then its unknown position never overrides the pinned choice
+    // Accessibility returning no frame is not evidence of a drag from Hidden
+    // to Visible. A temporary AX failure must not silently unpin the app.
+    func testUnreadablePositionDoesNotOverwriteHiddenPinOrObservedPosition() {
+        let engine = makeEngine()
+        collapse(engine)
+        XCTAssertEqual(table.sections["com.hidden"], .hidden)
+        XCTAssertEqual(observed.sections["com.hidden"], .hidden)
+
+        engine.expand()
+        inventory.items = inventory.items.filter { $0.bundleIdentifier != "com.hidden" }
+            + [MenuBarInventoryItem(bundleIdentifier: "com.hidden", frame: .zero, isUnreadable: true)]
+        XCTAssertEqual(collapse(engine), [own, "com.visible"])
+        XCTAssertEqual(table.sections["com.hidden"], .hidden)
+        XCTAssertEqual(observed.sections["com.hidden"], .hidden)
+
+        // Once Accessibility recovers, a real move is still recognized.
+        engine.expand()
+        move("com.hidden", to: 1450)
+        XCTAssertEqual(collapse(engine), [own, "com.hidden", "com.visible"])
+        XCTAssertEqual(table.sections["com.hidden"], .visible)
+    }
+
+    // An overflowing snapshot borrows items from a previous complete read.
+    // That borrowed old position cannot replace the user's newer pin.
+    func testOverflowCacheDoesNotOverwritePinOrObservedPosition() {
+        let engine = makeEngine()
+        collapse(engine)
+        engine.expand()
+        table.sections["com.visible"] = .hidden
+        // The current incomplete read omits com.visible altogether.
+        inventory.items = [item("com.hidden", x: 1100),
+            MenuBarInventoryItem(bundleIdentifier: "com.apple.MenuBarAgent",
+                                 frame: CGRect(x: 1500, y: 0, width: 24, height: 24),
+                                 systemIdentifier: "menu-bar-overflow-indicator")]
+        XCTAssertEqual(collapse(engine), [own])
+        XCTAssertEqual(table.sections["com.visible"], .hidden)
+        XCTAssertEqual(observed.sections["com.visible"], .visible,
+                       "an overflow cache is not a new observed drag")
+    }
+
     func testAnUnplaceableAppShowsUntilPinnedHidden() {
         inventory.items.append(MenuBarInventoryItem(bundleIdentifier: "at.obdev.littlesnitch.agent", frame: .zero, isUnreadable: true))
         let engine = makeEngine()
